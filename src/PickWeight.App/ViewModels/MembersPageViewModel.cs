@@ -92,28 +92,35 @@ public partial class MembersPageViewModel : ObservableObject, IEditablePageViewM
         }
 
         _isLoading = true;
-        StatusSeverity = InfoBarSeverity.Informational;
-        StatusMessage = "正在加载成员...";
-        Members.Clear();
-        FilteredMembers.Clear();
-
-        var source = _data.ActiveClassroom.Members.Select(member => member.Clone()).ToList();
-        for (var index = 0; index < source.Count; index++)
+        try
         {
-            Members.Add(CreateRow(source[index]));
-            if ((index + 1) % LoadBatchSize == 0)
-            {
-                StatusMessage = $"正在加载成员 {index + 1}/{source.Count}...";
-                await Task.Yield();
-            }
-        }
+            StatusSeverity = InfoBarSeverity.Informational;
+            StatusMessage = "正在加载成员...";
+            Members.Clear();
+            FilteredMembers.Clear();
 
-        await ApplyFilterAsync();
-        IsDirty = false;
-        StatusSeverity = InfoBarSeverity.Success;
-        StatusMessage = source.Count == 0 ? string.Empty : $"已加载 {source.Count} 名成员。";
-        _hasLoaded = true;
-        _isLoading = false;
+            var source = _data.ActiveClassroom.Members.Select(member => member.Clone()).ToList();
+            for (var index = 0; index < source.Count; index++)
+            {
+                Members.Add(CreateRow(source[index]));
+                if ((index + 1) % LoadBatchSize == 0)
+                {
+                    StatusMessage = $"正在加载成员 {index + 1}/{source.Count}...";
+                    await Task.Yield();
+                }
+            }
+
+            await ApplyFilterAsync();
+            IsDirty = false;
+            StatusSeverity = InfoBarSeverity.Success;
+            StatusMessage = source.Count == 0 ? string.Empty : $"已加载 {source.Count} 名成员。";
+            _hasLoaded = true;
+        }
+        finally
+        {
+            // 加载失败也必须复位，否则本页此后所有 Loaded 都会直接跳过，列表永久空白
+            _isLoading = false;
+        }
     }
 
     public bool ValidateStudentId(string? studentId, out string error)
@@ -504,9 +511,13 @@ public partial class MembersPageViewModel : ObservableObject, IEditablePageViewM
                 return false;
             }
 
-            var renames = Members
-                .Where(member => !string.Equals(member.OriginalName.Trim(), member.Name.Trim(), StringComparison.Ordinal))
-                .ToDictionary(member => member.OriginalName.Trim(), member => member.Name.Trim(), StringComparer.OrdinalIgnoreCase);
+            // 同一行在会话内被多次改名时以最新目标为准；ToDictionary 遇重复键会直接抛异常
+            var renames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var member in Members
+                .Where(member => !string.Equals(member.OriginalName.Trim(), member.Name.Trim(), StringComparison.Ordinal)))
+            {
+                renames[member.OriginalName.Trim()] = member.Name.Trim();
+            }
 
             await _data.ReplaceMembersAsync(models, renames);
             foreach (var member in Members)

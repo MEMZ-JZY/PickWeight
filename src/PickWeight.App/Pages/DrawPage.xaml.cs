@@ -28,10 +28,10 @@ public sealed partial class DrawPage : Page
     internal Task PrepareForNavigationAsync() => _viewModel.OnNavigatedFromAsync();
 
     /// <summary>
-    /// 键盘快捷键：空格/回车抽取，1-4 切换模式，+/- 调整人数，R 换一个。
+    /// 键盘快捷键：空格/回车抽取，1-4 切换模式（写入设置立即生效），+/- 调整人数，R 换一个。
     /// 焦点位于输入控件内时不拦截按键，避免影响正常输入。
     /// </summary>
-    private void PageRoot_KeyDown(object sender, KeyRoutedEventArgs e)
+    private async void PageRoot_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (IsFocusInInputControl())
         {
@@ -50,7 +50,7 @@ public sealed partial class DrawPage : Page
             case VirtualKey.Number3:
             case VirtualKey.Number4:
                 e.Handled = true;
-                _viewModel.SelectedDrawModeIndex = (int)(e.Key - VirtualKey.Number1);
+                await _viewModel.ApplyDrawModeShortcutAsync((int)(e.Key - VirtualKey.Number1));
                 break;
             case VirtualKey.Add:
             case (VirtualKey)187: // '+' 键

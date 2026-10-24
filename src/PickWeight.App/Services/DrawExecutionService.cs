@@ -68,7 +68,7 @@ public sealed class PreparedDraw
         DrawFilterOptions filters,
         DrawResult result,
         IReadOnlyList<string> candidateNames,
-        IReadOnlyDictionary<string, DrawExecutionService.MemberSnapshot> snapshots,
+        Dictionary<string, DrawExecutionService.MemberSnapshot> snapshots,
         int drawsSinceLastAutoReset,
         bool autoCommitSelection,
         int roundNumber,
@@ -78,7 +78,7 @@ public sealed class PreparedDraw
         Filters = filters;
         Result = result;
         CandidateNames = candidateNames;
-        Snapshots = snapshots;
+        _snapshots = snapshots;
         DrawsSinceLastAutoReset = drawsSinceLastAutoReset;
         AutoCommitSelection = autoCommitSelection;
         RoundNumber = roundNumber;
@@ -96,13 +96,25 @@ public sealed class PreparedDraw
     /// <summary>Prepare 时刻的本轮已抽名单快照，用于回滚。</summary>
     internal IReadOnlyList<string> RoundDrawnNames { get; }
 
-    internal IReadOnlyDictionary<string, DrawExecutionService.MemberSnapshot> Snapshots { get; }
+    internal IReadOnlyDictionary<string, DrawExecutionService.MemberSnapshot> Snapshots => _snapshots;
+
+    /// <summary>
+    /// 修正某位成员的回滚快照。调用方在 Prepare 期间临时改动过共享成员对象时
+    /// （如「本次优先」提权），必须把真实值写回，否则回滚会把临时值持久化。
+    /// </summary>
+    internal void ReplaceSnapshot(string normalizedName, DrawExecutionService.MemberSnapshot snapshot) =>
+        _snapshots[normalizedName] = snapshot;
+
+    private readonly Dictionary<string, DrawExecutionService.MemberSnapshot> _snapshots;
     internal int DrawsSinceLastAutoReset { get; }
     internal bool AutoCommitSelection { get; }
     internal DrawHistoryEntry? HistoryEntry { get; set; }
     internal bool AutoResetRecorded { get; set; }
     internal bool WasAutoReset { get; set; }
     internal HashSet<string> CommittedNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>「换一个」替换掉的成员姓名（Trim 后），重建历史时用于恢复 WasReplaced 标记。</summary>
+    internal HashSet<string> ReplacedNames { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed record DrawCommitOutcome(
@@ -296,6 +308,7 @@ public sealed class DrawExecutionService : IDrawExecutionService
         IEnumerable<Member> committedMembers,
         CancellationToken cancellationToken = default)
     {
+        var originalDrawnAt = prepared.HistoryEntry?.DrawnAt;
         RestoreSnapshots(prepared.Snapshots);
         _data.State.Settings.DrawsSinceLastAutoReset = prepared.DrawsSinceLastAutoReset;
         if (prepared.HistoryEntry is not null)
@@ -315,12 +328,48 @@ public sealed class DrawExecutionService : IDrawExecutionService
         var remaining = committedMembers.ToList();
         if (remaining.Count > 0)
         {
+            // 「换一个」替补成员不在 SelectedMembers 中，重建必须绕过归属校验，
+            // 否则替补的被点次数与历史会在回滚时被静默丢弃。
             await CommitAsync(
                 prepared,
                 remaining,
                 confirmSelection: prepared.DrawMode == DrawMode.Selection,
                 notify: false,
+                allowOutsideSelection: true,
                 cancellationToken: cancellationToken);
+
+            // 重建会以当前时刻新建历史条目；恢复原抽取时间并补回替换标记，
+            // 避免部分丢弃/离开页面后历史时间漂移、留痕丢失。
+            if (prepared.HistoryEntry is not null)
+            {
+                if (originalDrawnAt is not null && prepared.HistoryEntry.DrawnAt != originalDrawnAt.Value)
+                {
+                    prepared.HistoryEntry.DrawnAt = originalDrawnAt.Value;
+                    await _data.SaveAsync(cancellationToken);
+                }
+
+                if (prepared.ReplacedNames.Count > 0)
+                {
+                    prepared.HistoryEntry.EnsureRecords();
+                    var restored = false;
+                    foreach (var record in prepared.HistoryEntry.Records)
+                    {
+                        if (!prepared.ReplacedNames.Contains(record.Name.Trim()))
+                        {
+                            continue;
+                        }
+
+                        record.WasReplaced = true;
+                        restored = true;
+                    }
+
+                    if (restored)
+                    {
+                        await _data.SaveAsync(cancellationToken);
+                    }
+                }
+            }
+
             return;
         }
 
@@ -433,6 +482,8 @@ public sealed class DrawExecutionService : IDrawExecutionService
 
     private void MarkReplacedInHistory(PreparedDraw prepared, string replacedName)
     {
+        prepared.ReplacedNames.Add(replacedName.Trim());
+
         var entry = prepared.HistoryEntry;
         if (entry is null)
         {
