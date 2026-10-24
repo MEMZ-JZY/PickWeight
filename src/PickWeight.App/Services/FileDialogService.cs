@@ -29,13 +29,20 @@ public sealed class FileDialogService
 
     public async Task SaveTextAsync(string suggestedName, string extension, string content)
     {
+        var path = await SavePathAsync(suggestedName, extension);
+        if (path is not null)
+        {
+            await File.WriteAllTextAsync(path, content);
+        }
+    }
+
+    /// <summary>弹出保存对话框，返回用户选择的完整路径；取消返回 null。</summary>
+    public async Task<string?> SavePathAsync(string suggestedName, string extension)
+    {
         var picker = new FileSavePicker { SuggestedFileName = suggestedName };
         WinRT.Interop.InitializeWithWindow.Initialize(picker, App.WindowHandle);
         picker.FileTypeChoices.Add(extension.TrimStart('.').ToUpperInvariant(), [extension]);
         var file = await picker.PickSaveFileAsync();
-        if (file is not null)
-        {
-            await FileIO.WriteTextAsync(file, content);
-        }
+        return file?.Path;
     }
 }

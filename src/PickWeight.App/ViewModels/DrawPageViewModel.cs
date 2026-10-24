@@ -211,6 +211,24 @@ public partial class DrawPageViewModel : ObservableObject
     partial void OnExcludeRecentDrawCountChanged(double value) => RefreshFilters();
     partial void OnOnlyNeverDrawnChanged(bool value) => RefreshFilters();
 
+    /// <summary>
+    /// 主页键盘 1-4 切换点名模式：直接写入设置使其对下一次抽取立即生效。
+    /// 之前仅改 SelectedDrawModeIndex，该属性不参与抽取，导致快捷键静默失效。
+    /// </summary>
+    public async Task ApplyDrawModeShortcutAsync(int modeIndex)
+    {
+        var mode = (DrawMode)Math.Clamp(modeIndex, 0, 3);
+        if (_settings.Current.DrawMode == mode)
+        {
+            return;
+        }
+
+        await _settings.UpdateAsync(settings => settings.DrawMode = mode);
+        LoadRulesFromSettings();
+        StatusMessage = $"已切换到{ModeText(mode)}。";
+        _ = RefreshProbabilityPreviewAsync();
+    }
+
     [RelayCommand]
     private async Task DrawAsync()
     {
@@ -271,6 +289,13 @@ public partial class DrawPageViewModel : ObservableObject
             {
                 RestoreBoostedWeights();
             }
+        }
+
+        if (boostApplied)
+        {
+            // PrepareAsync 在提权窗口内捕获的快照带有临时权重，这里改回真实值，
+            // 避免后续丢弃/重建把提权后的权重写回成员并持久化。
+            CorrectBoostedSnapshots(prepared);
         }
 
         if (prepared.SelectedMembers.Count == 0)
@@ -603,6 +628,8 @@ public partial class DrawPageViewModel : ObservableObject
                 StatusMessage += " 通知发送失败。";
             }
 
+            ReleaseDrawLeaseIfFullyCommitted();
+
             await RefreshProbabilityPreviewAsync(
                 reloadWeights: false,
                 cancellationToken: operationCancellation.Token);
@@ -667,6 +694,10 @@ public partial class DrawPageViewModel : ObservableObject
             {
                 _currentDraw = null;
                 ReleaseDrawLease();
+            }
+            else
+            {
+                ReleaseDrawLeaseIfFullyCommitted();
             }
 
             NotifyDrawStateChanged();
@@ -745,6 +776,7 @@ public partial class DrawPageViewModel : ObservableObject
                 Results.Insert(Math.Max(0, index), row);
             }
 
+            ReleaseDrawLeaseIfFullyCommitted();
             NotifyDrawStateChanged();
             StatusMessage = $"{item.Name} 已替换为 {outcome.Replacement?.Name ?? "新成员"}。";
             await RefreshProbabilityPreviewAsync(
@@ -779,7 +811,7 @@ public partial class DrawPageViewModel : ObservableObject
         var members = _data.ActiveClassroom.Members;
         foreach (var member in members)
         {
-            if (!_boostedNames.Contains(member.Name))
+            if (!_boostedNames.Contains(member.Name.Trim()))
             {
                 continue;
             }
@@ -807,10 +839,27 @@ public partial class DrawPageViewModel : ObservableObject
     }
 
     /// <summary>
+    /// 把本次提权成员的回滚快照改回真实权重。Prepare 在提权窗口内捕获的快照
+    /// 若不修正，丢弃/重建时会把 3 倍临时权重持久化。
+    /// </summary>
+    private void CorrectBoostedSnapshots(PreparedDraw prepared)
+    {
+        foreach (var member in _data.ActiveClassroom.Members)
+        {
+            var normalizedName = member.Name.Trim();
+            if (_boostedNames.Contains(normalizedName)
+                && prepared.Snapshots.ContainsKey(normalizedName))
+            {
+                prepared.ReplaceSnapshot(normalizedName, DrawExecutionService.MemberSnapshot.Capture(member));
+            }
+        }
+    }
+
+    /// <summary>
     /// 刷新公平性提醒：排除本次会话已忽略的成员后，
     /// 重新计算长期未被点到的成员名单。
     /// </summary>
-    private void RefreshFairnessReminder()
+    internal void RefreshFairnessReminder()
     {
         var candidates = FairnessService.FindLongUncalled(
             _data.ActiveClassroom.Members,
@@ -946,7 +995,7 @@ public partial class DrawPageViewModel : ObservableObject
         _ = RefreshProbabilityPreviewAsync();
     }
 
-    private async Task RefreshProbabilityPreviewAsync(
+    internal async Task RefreshProbabilityPreviewAsync(
         bool reloadWeights = true,
         CancellationToken cancellationToken = default)
     {
@@ -1005,11 +1054,26 @@ public partial class DrawPageViewModel : ObservableObject
         if (enabled && progress.NeedsNextRound && !_synchronizingGroups)
         {
             round.StartNextRound();
+            _ = SaveRoundResetAsync();
             StatusMessage = $"第 {round.RoundNumber - 1} 轮已抽完，自动开始第 {round.RoundNumber} 轮。";
             CurrentRoundNumber = round.RoundNumber;
             RoundDrawnCount = 0;
+            RoundDrawableCount = filtered.Count;
             OnPropertyChanged(nameof(RoundProgressText));
             OnPropertyChanged(nameof(RoundProgressValue));
+        }
+    }
+
+    /// <summary>自动翻轮后立即落盘，避免退出应用时轮次状态回退。</summary>
+    private async Task SaveRoundResetAsync()
+    {
+        try
+        {
+            await _data.SaveAsync();
+        }
+        catch
+        {
+            // 落盘失败不阻塞预览；下一次提交或手动翻轮会再次保存。
         }
     }
 
@@ -1034,6 +1098,18 @@ public partial class DrawPageViewModel : ObservableObject
     {
         _drawLease?.Dispose();
         _drawLease = null;
+    }
+
+    /// <summary>
+    /// 全部结果已确认时释放抽取租约，避免选择模式确认完毕后下一次抽取被永久阻塞。
+    /// 结果卡片保留（与自动提交模式一致），换一个/丢弃/评价仍可继续操作。
+    /// </summary>
+    private void ReleaseDrawLeaseIfFullyCommitted()
+    {
+        if (_drawLease is not null && Results.Count > 0 && Results.All(row => row.IsCommitted))
+        {
+            ReleaseDrawLease();
+        }
     }
 
     private bool TryStartActiveOperation(
@@ -1360,7 +1436,6 @@ public partial class DrawPageViewModel : ObservableObject
         var classroom = _data.ActiveClassroom;
         AttendanceMembers.Clear();
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var absentNames = DrawFilterService.GetAbsentNames(classroom.Members);
 
         foreach (var member in classroom.Members
             .Where(member => member.IsActive && !string.IsNullOrWhiteSpace(member.Name))
@@ -1378,7 +1453,8 @@ public partial class DrawPageViewModel : ObservableObject
                 }));
         }
 
-        AbsentCount = absentNames.Count;
+        // 考勤面板只统计启用成员，直接从面板行计数，避免把停用成员的请假状态错算进请假总数
+        AbsentCount = AttendanceMembers.Count(row => row.IsAbsent);
         PresentCount = AttendanceMembers.Count - AbsentCount;
         OnPropertyChanged(nameof(AttendanceSummary));
         OnPropertyChanged(nameof(HasAttendanceMembers));

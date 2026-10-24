@@ -189,8 +189,8 @@ public sealed class PersistenceTests
 
             // 第二次加载不应再次迁移（无备份覆盖、无重复文件夹）
             Assert.Equal(AppState.CurrentSchemaVersion, second.SchemaVersion);
-            Assert.Equal(1, (await store.ListClassroomNamesAsync()).Count);
-            Assert.Equal(1, Directory.GetFiles(directory, "*.v1.bak").Length);
+            Assert.Single(await store.ListClassroomNamesAsync());
+            Assert.Single(Directory.GetFiles(directory, "*.v1.bak"));
             Assert.Equal(first.ActiveClassroomName, second.ActiveClassroomName);
         }
         finally

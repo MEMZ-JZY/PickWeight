@@ -49,4 +49,24 @@ public sealed class Member
  IsWeightAdjustedByRating = IsWeightAdjustedByRating
  };
  }
+
+ /// <summary>
+ /// 把另一名成员的全部字段复制到当前实例（不替换实例本身）。
+ /// 用于恢复快照时保持对象引用稳定。
+ /// </summary>
+ public void CopyFrom(Member other)
+ {
+ ArgumentNullException.ThrowIfNull(other);
+ Name = other.Name;
+ Gender = other.Gender;
+ ExplicitWeight = other.ExplicitWeight;
+ ImplicitWeight = other.ImplicitWeight;
+ CalledCount = other.CalledCount;
+ IsWeightLinked = other.IsWeightLinked;
+ IsActive = other.IsActive;
+ StudentId = other.StudentId;
+ Note = other.Note;
+ AbsentOn = other.AbsentOn;
+ IsWeightAdjustedByRating = other.IsWeightAdjustedByRating;
+ }
 }

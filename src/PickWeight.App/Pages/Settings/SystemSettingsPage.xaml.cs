@@ -78,4 +78,36 @@ public sealed partial class SystemSettingsPage : Page
         Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true });
     }
+
+    private async void ExportDiagnostics_Click(object sender, RoutedEventArgs e)
+    {
+        var destination = await App.GetService<FileDialogService>().SavePathAsync("PickWeight-诊断包", ".zip");
+        if (destination is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var settings = App.GetService<PickWeight.Core.Abstractions.ISettingsService>().Current.Clone();
+            await App.GetService<AppLogService>().ExportDiagnosticsAsync(settings, destination);
+            await new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "诊断包已导出",
+                Content = destination,
+                CloseButtonText = "确定"
+            }.ShowAsync();
+        }
+        catch (Exception exception)
+        {
+            await new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "诊断包导出失败",
+                Content = exception.Message,
+                CloseButtonText = "确定"
+            }.ShowAsync();
+        }
+    }
 }

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # .NET 8 SDK 不支持 slnx 解决方案文件，按项目逐个还原
+      - name: Restore
+        run: |
+          dotnet restore src/PickWeight.App/PickWeight.App.csproj
+          dotnet restore tests/PickWeight.Core.Tests/PickWeight.Core.Tests.csproj
+          dotnet restore tests/PickWeight.ClassIsland.Protocol.Tests/PickWeight.ClassIsland.Protocol.Tests.csproj
+          dotnet restore "PickWeight ClassIsland/PickWeight.ClassIsland.Plugin.csproj"
+
+      - name: Build main app (x64)
+        run: dotnet build src/PickWeight.App/PickWeight.App.csproj -p:Platform=x64 --no-restore --nologo
+
+      - name: Test PickWeight.Core
+        run: dotnet test tests/PickWeight.Core.Tests/PickWeight.Core.Tests.csproj --no-restore --nologo
+
+      - name: Test PickWeight.ClassIsland.Protocol
+        run: dotnet test tests/PickWeight.ClassIsland.Protocol.Tests/PickWeight.ClassIsland.Protocol.Tests.csproj --no-restore --nologo
+
+      # App 测试项目仅支持 x86/x64/ARM64，必须显式指定平台
+      - name: Test PickWeight.App
+        run: dotnet test tests/PickWeight.App.Tests/PickWeight.App.Tests.csproj -p:Platform=x64 --no-restore --nologo
+
+      - name: Package release
+        shell: pwsh
+        run: ./scripts/package-release.ps1
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PickWeight-dist
+          path: |
+            dist/PickWeight-win-x64.zip
+            dist/ClassIsland/
+          if-no-files-found: error

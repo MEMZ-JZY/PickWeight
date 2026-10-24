@@ -13,15 +13,11 @@ public sealed class DrawRecord
     /// <summary>评价备注。</summary>
     public string? Note { get; set; }
 
-    /// <summary>该成员是否被「换一个」换掉。</summary>
-    public bool WasReplaced { get; set; }
-
     public DrawRecord Clone() => new()
     {
         Name = Name,
         Rating = Rating,
-        Note = Note,
-        WasReplaced = WasReplaced
+        Note = Note
     };
 }
 

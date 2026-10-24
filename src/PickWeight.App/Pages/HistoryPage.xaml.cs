@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
 using PickWeight_App.Services;
 using PickWeight_App.ViewModels;
 
@@ -12,6 +13,13 @@ public sealed partial class HistoryPage : Page
         InitializeComponent();
         DataContext = App.GetService<HistoryPageViewModel>();
         Loaded += (_, _) => PlayPageEntrance();
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        // ViewModel 是 transient，离开页面必须退订单例事件，否则每次导航泄漏一个实例
+        (DataContext as HistoryPageViewModel)?.Detach();
+        base.OnNavigatedFrom(e);
     }
 
     private void PlayPageEntrance()

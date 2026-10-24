@@ -19,6 +19,7 @@ public partial class HistoryPageViewModel : ObservableObject
     private List<DrawHistoryEntry> _allHistory = [];
     private List<DrawHistoryEntry> _filteredHistory = [];
     private bool _isReloading;
+    private int _reloadVersion;
 
     public ObservableCollection<DrawHistoryRowViewModel> History { get; } = [];
     public ObservableCollection<OverviewStatisticRowViewModel> OverviewStatistics { get; } = [];
@@ -76,7 +77,8 @@ public partial class HistoryPageViewModel : ObservableObject
         _dialogs = dialogs;
         _files = files;
         _historyExport = historyExport;
-        Reload();
+        // ReloadAsync 的订阅发生在首个 await 之前，构造时即完成注册
+        _ = ReloadAsync();
     }
 
     /// <summary>归档完成后刷新数据，让勾选「包含归档数据」的统计保持最新。</summary>
@@ -84,42 +86,75 @@ public partial class HistoryPageViewModel : ObservableObject
     {
         if (IncludeArchived)
         {
-            Reload();
+            _ = ReloadAsync();
         }
     }
+
+    /// <summary>
+    /// 离开页面时退订单例事件。本 ViewModel 为 transient，若不退订，
+    /// 每次导航都会向单例 AppDataService 泄漏一个持有全部历史克隆的实例。
+    /// </summary>
+    public void Detach() => _data.HistoryArchived -= Data_HistoryArchived;
 
     partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(HasStatus));
     partial void OnStartDateChanged(DateTimeOffset? value) => ApplyFilters();
     partial void OnEndDateChanged(DateTimeOffset? value) => ApplyFilters();
     partial void OnSelectedMemberFilterIndexChanged(int value) => ApplyFilters();
     partial void OnSelectedGroupFilterIndexChanged(int value) => ApplyFilters();
-    partial void OnIncludeArchivedChanged(bool value) => Reload();
+    partial void OnIncludeArchivedChanged(bool value) => _ = ReloadAsync();
 
-    public void Reload()
+    public void Reload() => _ = ReloadAsync();
+
+    /// <summary>
+    /// 异步重建历史与统计。归档读取不再阻塞 UI 线程（同步等待异步 IO 在
+    /// UI 线程上存在死锁风险）；并发触发时旧任务按版本号自动作废。
+    /// </summary>
+    public async Task ReloadAsync()
     {
-        // 订阅只在导航重建 VM 时发生一次；AppDataService 是单例，旧 VM 会被整体替换
+        var version = ++_reloadVersion;
         _data.HistoryArchived -= Data_HistoryArchived;
         _data.HistoryArchived += Data_HistoryArchived;
-        _isReloading = true;
-        var source = IncludeArchived
-            ? LoadCombinedHistory()
-            : _data.ActiveClassroom.DrawHistory;
-        _allHistory = source
-            .OrderByDescending(entry => entry.DrawnAt)
-            .Select(entry => entry.Clone())
-            .ToList();
-        RebuildFilterOptions();
-        SelectedMemberFilterIndex = Math.Clamp(SelectedMemberFilterIndex, 0, Math.Max(0, MemberFilterOptions.Count - 1));
-        SelectedGroupFilterIndex = Math.Clamp(SelectedGroupFilterIndex, 0, Math.Max(0, GroupFilterOptions.Count - 1));
-        _isReloading = false;
-        ApplyFilters();
-    }
+        List<DrawHistoryEntry>? archived = null;
+        if (IncludeArchived)
+        {
+            try
+            {
+                // 不用 ConfigureAwait(false)：后续要更新绑定到 UI 的集合，
+                // 必须留在 UI 线程；死锁风险已通过消除同步等待解决。
+                archived = (await _data.LoadArchivedHistoryAsync()).ToList();
+            }
+            catch
+            {
+                // 归档读取失败不应让历史页卡死，仅展示主文件历史
+                archived = [];
+            }
+        }
 
-    /// <summary>合并主文件历史与归档历史（归档部分按时间升序追加，避免打乱时序）。</summary>
-    private IEnumerable<DrawHistoryEntry> LoadCombinedHistory()
-    {
-        var archived = _data.LoadArchivedHistoryAsync().GetAwaiter().GetResult();
-        return archived.Concat(_data.ActiveClassroom.DrawHistory);
+        if (version != _reloadVersion)
+        {
+            return;
+        }
+
+        _isReloading = true;
+        try
+        {
+            var source = IncludeArchived
+                ? (archived ?? []).Concat(_data.ActiveClassroom.DrawHistory)
+                : _data.ActiveClassroom.DrawHistory;
+            _allHistory = source
+                .OrderByDescending(entry => entry.DrawnAt)
+                .Select(entry => entry.Clone())
+                .ToList();
+            RebuildFilterOptions();
+            SelectedMemberFilterIndex = Math.Clamp(SelectedMemberFilterIndex, 0, Math.Max(0, MemberFilterOptions.Count - 1));
+            SelectedGroupFilterIndex = Math.Clamp(SelectedGroupFilterIndex, 0, Math.Max(0, GroupFilterOptions.Count - 1));
+        }
+        finally
+        {
+            _isReloading = false;
+        }
+
+        ApplyFilters();
     }
 
     private void RebuildFilterOptions()
@@ -334,7 +369,7 @@ public partial class HistoryPageViewModel : ObservableObject
         }
 
         _data.ActiveClassroom.DrawHistory.Clear();
-        Reload();
+        await ReloadAsync();
         await _data.SaveAsync();
         StatusSeverity = InfoBarSeverity.Success;
         StatusMessage = "抽取历史已清除";

@@ -1,10 +1,36 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using PickWeight.Core.Abstractions;
 using PickWeight.Core.Models;
 
 namespace PickWeight_App.Services;
+
+// 本地 API 的响应 DTO。JsonPropertyName 固定线上字段名（历史集成为小写开头），
+// 配合 LocalApiJsonContext 源生成序列化，避免裁剪发布（PublishTrimmed）下的
+// 反射序列化 IL2026 风险。
+internal sealed record ApiError([property: JsonPropertyName("error")] string Error);
+
+internal sealed record ApiHealth(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("version")] string? Version);
+
+internal sealed record ApiRecent(
+    [property: JsonPropertyName("drawnAt")] DateTimeOffset? DrawnAt,
+    [property: JsonPropertyName("names")] IReadOnlyList<string> Names);
+
+internal sealed record ApiNames([property: JsonPropertyName("names")] IReadOnlyList<string> Names);
+
+internal sealed record ApiStatus([property: JsonPropertyName("status")] string Status);
+
+[JsonSerializable(typeof(ApiError))]
+[JsonSerializable(typeof(ApiHealth))]
+[JsonSerializable(typeof(ApiRecent))]
+[JsonSerializable(typeof(ApiNames))]
+[JsonSerializable(typeof(ApiStatus))]
+internal sealed partial class LocalApiJsonContext : JsonSerializerContext;
 
 /// <summary>Token-protected, loopback-only control surface for local OBS and classroom integrations.</summary>
 public sealed class LocalApiService : IDisposable
@@ -122,38 +148,60 @@ public sealed class LocalApiService : IDisposable
         {
             if (!IsAuthorized(context.Request))
             {
-                await WriteJsonAsync(context.Response, 401, new { error = "Unauthorized" }, cancellationToken);
+                await WriteJsonAsync(context.Response, 401, new ApiError("Unauthorized"), LocalApiJsonContext.Default.ApiError, cancellationToken);
                 return;
             }
 
             switch (context.Request.HttpMethod, context.Request.Url?.AbsolutePath)
             {
                 case ("GET", "/v1/health"):
-                    await WriteJsonAsync(context.Response, 200, new { status = "ok", version = typeof(App).Assembly.GetName().Version?.ToString(3) }, cancellationToken);
+                    await WriteJsonAsync(
+                        context.Response,
+                        200,
+                        new ApiHealth("ok", typeof(App).Assembly.GetName().Version?.ToString(3)),
+                        LocalApiJsonContext.Default.ApiHealth,
+                        cancellationToken);
                     break;
                 case ("GET", "/v1/recent"):
                     var latest = _data.ActiveClassroom.DrawHistory.OrderByDescending(item => item.DrawnAt).FirstOrDefault();
-                    await WriteJsonAsync(context.Response, 200, new { drawnAt = latest?.DrawnAt, names = latest?.MemberNames ?? [] }, cancellationToken);
+                    await WriteJsonAsync(
+                        context.Response,
+                        200,
+                        new ApiRecent(latest?.DrawnAt, latest?.MemberNames ?? []),
+                        LocalApiJsonContext.Default.ApiRecent,
+                        cancellationToken);
                     break;
                 case ("POST", "/v1/draw"):
                     var names = await DrawOnUiThreadAsync(cancellationToken);
-                    await WriteJsonAsync(context.Response, 200, new { names }, cancellationToken);
+                    await WriteJsonAsync(context.Response, 200, new ApiNames(names), LocalApiJsonContext.Default.ApiNames, cancellationToken);
                     break;
                 case ("POST", "/v1/quick-draw"):
                     var quickDrawResult = await StartQuickDrawOnUiThreadAsync(cancellationToken);
-                    var (quickDrawStatusCode, quickDrawBody) = quickDrawResult.Status switch
+                    switch (quickDrawResult.Status)
                     {
-                        QuickDrawRequestStatus.Accepted => (202, (object)new { status = "accepted" }),
-                        QuickDrawRequestStatus.Busy => (409, (object)new { error = "QuickDrawBusy" }),
-                        QuickDrawRequestStatus.NoCandidates => (422, (object)new { error = "NoEligibleCandidates" }),
-                        QuickDrawRequestStatus.Unavailable => (503, (object)new { error = "QuickDrawUnavailable" }),
-                        QuickDrawRequestStatus.Canceled => (499, (object)new { error = "RequestCanceled" }),
-                        _ => (500, (object)new { error = "RequestFailed" })
-                    };
-                    await WriteJsonAsync(context.Response, quickDrawStatusCode, quickDrawBody, cancellationToken);
+                        case QuickDrawRequestStatus.Accepted:
+                            await WriteJsonAsync(context.Response, 202, new ApiStatus("accepted"), LocalApiJsonContext.Default.ApiStatus, cancellationToken);
+                            break;
+                        case QuickDrawRequestStatus.Busy:
+                            await WriteJsonAsync(context.Response, 409, new ApiError("QuickDrawBusy"), LocalApiJsonContext.Default.ApiError, cancellationToken);
+                            break;
+                        case QuickDrawRequestStatus.NoCandidates:
+                            await WriteJsonAsync(context.Response, 422, new ApiError("NoEligibleCandidates"), LocalApiJsonContext.Default.ApiError, cancellationToken);
+                            break;
+                        case QuickDrawRequestStatus.Unavailable:
+                            await WriteJsonAsync(context.Response, 503, new ApiError("QuickDrawUnavailable"), LocalApiJsonContext.Default.ApiError, cancellationToken);
+                            break;
+                        case QuickDrawRequestStatus.Canceled:
+                            await WriteJsonAsync(context.Response, 499, new ApiError("RequestCanceled"), LocalApiJsonContext.Default.ApiError, cancellationToken);
+                            break;
+                        default:
+                            await WriteJsonAsync(context.Response, 500, new ApiError("RequestFailed"), LocalApiJsonContext.Default.ApiError, cancellationToken);
+                            break;
+                    }
+
                     break;
                 default:
-                    await WriteJsonAsync(context.Response, 404, new { error = "NotFound" }, cancellationToken);
+                    await WriteJsonAsync(context.Response, 404, new ApiError("NotFound"), LocalApiJsonContext.Default.ApiError, cancellationToken);
                     break;
             }
         }
@@ -161,7 +209,7 @@ public sealed class LocalApiService : IDisposable
         {
             try
             {
-                await WriteJsonAsync(context.Response, 409, new { error = "DrawBusy" }, CancellationToken.None);
+                await WriteJsonAsync(context.Response, 409, new ApiError("DrawBusy"), LocalApiJsonContext.Default.ApiError, CancellationToken.None);
             }
             catch
             {
@@ -183,7 +231,7 @@ public sealed class LocalApiService : IDisposable
 
             try
             {
-                await WriteJsonAsync(context.Response, 500, new { error = "RequestFailed" }, CancellationToken.None);
+                await WriteJsonAsync(context.Response, 500, new ApiError("RequestFailed"), LocalApiJsonContext.Default.ApiError, CancellationToken.None);
             }
             catch
             {
@@ -424,11 +472,16 @@ public sealed class LocalApiService : IDisposable
         return completion.Task;
     }
 
-    private static async Task WriteJsonAsync(HttpListenerResponse response, int statusCode, object value, CancellationToken cancellationToken)
+    private static async Task WriteJsonAsync<T>(
+        HttpListenerResponse response,
+        int statusCode,
+        T value,
+        JsonTypeInfo<T> typeInfo,
+        CancellationToken cancellationToken)
     {
         response.StatusCode = statusCode;
         response.ContentType = "application/json; charset=utf-8";
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, typeInfo);
         response.ContentLength64 = bytes.Length;
         try
         {

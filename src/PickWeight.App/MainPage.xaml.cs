@@ -119,11 +119,12 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async Task RefreshClassroomUiAsync()
+    private Task RefreshClassroomUiAsync()
     {
         var data = App.GetService<AppDataService>();
         ClassroomNameText.Text = data.State.ActiveClassroomName;
         ClassroomLabel.Visibility = Visibility.Visible;
+        return Task.CompletedTask;
     }
 
     private async Task SwitchClassroomAsync(string name)

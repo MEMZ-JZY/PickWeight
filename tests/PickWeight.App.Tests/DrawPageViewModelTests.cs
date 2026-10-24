@@ -257,6 +257,75 @@ public sealed class DrawPageViewModelTests
         await fixture.ViewModel.OnNavigatedFromAsync();
     }
 
+    [Fact]
+    public async Task SelectionDraw_AllConfirmed_ReleasesLeaseForNextDraw()
+    {
+        using var fixture = DrawPageFixture.Create(DrawMode.Selection);
+
+        await fixture.ViewModel.DrawCommand.ExecuteAsync(null);
+        await fixture.ViewModel.Results[0].CommitCommand.ExecuteAsync(null);
+
+        // 全部确认后租约必须释放，否则此后所有抽取（含快捷窗口/热键）被永久阻塞
+        using (var lease = fixture.Coordinator.TryAcquire())
+        {
+            Assert.NotNull(lease);
+        }
+
+        await fixture.ViewModel.DrawCommand.ExecuteAsync(null);
+
+        // 新一次抽取产生未确认的新结果行，而不是停留在旧的已确认行上
+        Assert.Single(fixture.ViewModel.Results);
+        Assert.False(fixture.ViewModel.Results[0].IsCommitted);
+
+        await fixture.ViewModel.OnNavigatedFromAsync();
+    }
+
+    [Fact]
+    public async Task DiscardResult_WithBoostedWeights_RestoresOriginalWeight()
+    {
+        using var fixture = DrawPageFixture.Create(DrawMode.Weighted);
+        var member = fixture.Data.ActiveClassroom.Members[0];
+        var originalWeight = member.ExplicitWeight;
+
+        // 张三从未被点过 → 公平性提醒生效 → 下次抽取前临时提权 3 倍
+        fixture.ViewModel.RefreshFairnessReminder();
+        Assert.True(fixture.ViewModel.HasFairnessReminder);
+
+        await fixture.ViewModel.DrawCommand.ExecuteAsync(null);
+        Assert.Equal(originalWeight, member.ExplicitWeight);
+
+        // 丢弃必须回滚到真实快照，而不是把提权后的临时权重持久化
+        await fixture.ViewModel.Results[0].DiscardCommand.ExecuteAsync(null);
+
+        Assert.Equal(originalWeight, member.ExplicitWeight);
+    }
+
+    [Fact]
+    public async Task DiscardOtherRow_AfterReplace_KeepsReplacementCommitted()
+    {
+        using var fixture = DrawPageFixture.Create(DrawMode.Weighted);
+        fixture.Data.ActiveClassroom.Members.Add(new Member { Name = "李四" });
+        fixture.Data.ActiveClassroom.Members.Add(new Member { Name = "王五" });
+        fixture.ViewModel.TargetCount = 2d;
+
+        await fixture.ViewModel.DrawCommand.ExecuteAsync(null);
+        Assert.Equal(2, fixture.ViewModel.Results.Count);
+
+        // 固定随机源：抽中张三和李四；「换一个」把张三替换为王五
+        await fixture.ViewModel.Results[0].ReplaceCommand.ExecuteAsync(null);
+        Assert.Equal("王五", fixture.ViewModel.Results[0].Name);
+        Assert.Equal(1, fixture.Data.ActiveClassroom.Members.First(m => m.Name == "王五").CalledCount);
+
+        // 丢弃另一行（李四）触发重建：替补王五的提交不得被归属校验静默回滚
+        await fixture.ViewModel.Results[1].DiscardCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, fixture.Data.ActiveClassroom.Members.First(m => m.Name == "王五").CalledCount);
+        var entry = Assert.Single(fixture.Data.ActiveClassroom.DrawHistory);
+        Assert.Contains("王五", entry.MemberNames);
+
+        await fixture.ViewModel.OnNavigatedFromAsync();
+    }
+
     private static void AssertLeaseAvailable(DrawExecutionCoordinator coordinator)
     {
         using var lease = coordinator.TryAcquire();

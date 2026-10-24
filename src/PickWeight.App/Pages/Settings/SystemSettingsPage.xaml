@@ -45,6 +45,8 @@
                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="本地 API 仅监听 127.0.0.1:17861，外部脚本需在 X-PickWeight-Token 请求头中携带令牌。" TextWrapping="Wrap" />
                 <Button Click="OpenDataFolder_Click" Content="打开数据文件夹" />
                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="成员、历史与配置保存在 %LOCALAPPDATA%\PickWeight，班级配置位于 classes\班级名\implicit_config.json。" TextWrapping="Wrap" />
+                <Button Click="ExportDiagnostics_Click" Content="导出诊断包" />
+                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="打包最近 30 天日志与脱敏设置（不含成员数据、不含 API 令牌）为一个 zip，便于反馈问题。" TextWrapping="Wrap" />
             </StackPanel>
         </ScrollViewer>
     </Grid>
